@@ -19,6 +19,7 @@ def make_logger(**kwargs) -> TelegramLogger:
         chat_id=-100123,
         topics={"info": 2, "error": 7},
         service_name="test-svc",
+        environment="test-env",
         blocking=True,
         **kwargs,
     )
@@ -35,10 +36,14 @@ def raise_and_catch() -> Exception:
 
 class TestFormatting:
     def test_build_message_escapes_html(self):
-        msg = build_message("info", "svc <x>", "a <b> & c", {"user_id": 1})
+        msg = build_message("info", "svc <x>", None, "a <b> & c", {"user_id": 1})
         assert "<x>" not in msg.replace("&lt;x&gt;", "")
         assert "&lt;b&gt;" in msg
         assert "user_id=1" in msg
+
+    def test_environment_prefix(self):
+        msg = build_message("info", "svc", "prod", "hello", {})
+        assert "<b>[svc]</b><b>[prod]</b> hello" in msg
 
     def test_traceback_trimmed_keeps_tail(self):
         exc = raise_and_catch()
@@ -94,6 +99,7 @@ class TestLogger:
         assert chat_id == -100123
         assert thread_id == 2
         assert "[test-svc]" in text
+        assert "[test-env]" in text
         assert "queue=agentic" in text
 
     def test_error_with_traceback(self):

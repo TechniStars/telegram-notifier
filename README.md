@@ -116,6 +116,7 @@ tg = TelegramLogger(
     # bot_token / chat_id default to TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID env vars
     topics={"info": 4, "warning": 6, "error": 8, "user_action": 10},
     service_name="service1",
+    environment="prod",  # defaults to TELEGRAM_ENVIRONMENT env var; renders as [service1][prod]
 )
 ```
 
@@ -150,6 +151,7 @@ as a handler for your entire `logging` output, or the group turns into noise.
 | `chat_id` | env `TELEGRAM_CHAT_ID` | target group id (e.g. `-100…`) |
 | `topics` | `{}` | level → `message_thread_id`; missing level posts to General |
 | `service_name` | `None` | bold prefix `[name]` in every message |
+| `environment` | env `TELEGRAM_ENVIRONMENT` | extra prefix `[prod]` / `[dev]` / `[local]` after the service name |
 | `dedup_window_seconds` | `300` | error suppression window |
 | `blocking` | `False` | sync methods send inline instead of daemon thread |
 | `timeout` | `10` | HTTP timeout seconds |

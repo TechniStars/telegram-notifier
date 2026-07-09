@@ -26,22 +26,30 @@ def format_fields(fields: dict) -> str:
     return " | ".join(f"{key}={value}" for key, value in fields.items())
 
 
-def build_message(level: str, service_name: str | None, text: str, fields: dict) -> str:
+def build_message(level: str, service_name: str | None, environment: str | None,
+                  text: str, fields: dict) -> str:
     """Build the HTML header part of a notification (no traceback)."""
     text = text[:TEXT_BUDGET]
     parts = [EMOJI[level], " "]
     if service_name:
-        parts.append(f"<b>[{html.escape(service_name)}]</b> ")
+        parts.append(f"<b>[{html.escape(service_name)}]</b>")
+    if environment:
+        parts.append(f"<b>[{html.escape(environment)}]</b>")
+    if service_name or environment:
+        parts.append(" ")
     parts.append(html.escape(text))
     if fields:
         parts.append("\n<code>" + html.escape(format_fields(fields)) + "</code>")
     return "".join(parts)
 
 
-def build_plain(level: str, service_name: str | None, text: str, fields: dict) -> str:
+def build_plain(level: str, service_name: str | None, environment: str | None,
+                text: str, fields: dict) -> str:
     """Plain-text variant, used as a document caption or as a no-HTML fallback."""
     text = text[:TEXT_BUDGET]
-    prefix = f"[{service_name}] " if service_name else ""
+    prefix = "".join(f"[{part}]" for part in (service_name, environment) if part)
+    if prefix:
+        prefix += " "
     message = f"{EMOJI[level]} {prefix}{text}"
     if fields:
         message += "\n" + format_fields(fields)

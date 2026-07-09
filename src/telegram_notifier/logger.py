@@ -43,6 +43,7 @@ class TelegramLogger:
         chat_id: int | str | None = None,
         topics: dict[str, int] | None = None,
         service_name: str | None = None,
+        environment: str | None = None,
         dedup_window_seconds: float = 300.0,
         blocking: bool = False,
         timeout: float = 10.0,
@@ -53,6 +54,7 @@ class TelegramLogger:
         self._chat_id = chat_id
         self._topics = topics or {}
         self._service_name = service_name
+        self._environment = environment or os.environ.get("TELEGRAM_ENVIRONMENT")
         self._blocking = blocking
         self._dedup = ErrorDeduplicator(dedup_window_seconds)
         self._sender = TelegramSender(bot_token, timeout=timeout) if self.enabled else None
@@ -91,8 +93,8 @@ class TelegramLogger:
         if not self.enabled:
             return None
         return _Notification(
-            html=build_message(level, self._service_name, text, fields),
-            plain=build_plain(level, self._service_name, text, fields),
+            html=build_message(level, self._service_name, self._environment, text, fields),
+            plain=build_plain(level, self._service_name, self._environment, text, fields),
             thread_id=self._topics.get(level),
             traceback=None,
         )
