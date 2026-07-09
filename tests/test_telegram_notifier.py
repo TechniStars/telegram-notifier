@@ -39,11 +39,16 @@ class TestFormatting:
         msg = build_message("info", "svc <x>", None, "a <b> & c", {"user_id": 1})
         assert "<x>" not in msg.replace("&lt;x&gt;", "")
         assert "&lt;b&gt;" in msg
-        assert "user_id=1" in msg
+        assert "user_id: <code>1</code>" in msg
 
-    def test_environment_prefix(self):
+    def test_environment_in_origin_line(self):
         msg = build_message("info", "svc", "prod", "hello", {})
-        assert "<b>[svc]</b><b>[prod]</b> hello" in msg
+        assert "<b>hello</b>" in msg
+        assert "<i>[svc · prod]</i>" in msg
+
+    def test_fields_one_per_line(self):
+        msg = build_message("info", None, None, "t", {"a": 1, "b": "x"})
+        assert "\n\na: <code>1</code>\nb: <code>x</code>" in msg
 
     def test_traceback_trimmed_keeps_tail(self):
         exc = raise_and_catch()
@@ -98,9 +103,8 @@ class TestLogger:
         (chat_id, text, thread_id), _ = tg._sender.send_message.call_args
         assert chat_id == -100123
         assert thread_id == 2
-        assert "[test-svc]" in text
-        assert "[test-env]" in text
-        assert "queue=agentic" in text
+        assert "[test-svc · test-env]" in text
+        assert "queue: <code>agentic</code>" in text
 
     def test_error_with_traceback(self):
         tg = make_logger()

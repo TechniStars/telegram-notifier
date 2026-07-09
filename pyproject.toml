@@ -1,6 +1,6 @@
 [project]
 name = "telegram-notifier"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lightweight Telegram notifications for services: events, warnings, errors with deduplicated tracebacks."
 requires-python = ">=3.10"
 dependencies = [

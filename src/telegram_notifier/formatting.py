@@ -22,38 +22,45 @@ EMOJI = {
 }
 
 
-def format_fields(fields: dict) -> str:
-    return " | ".join(f"{key}={value}" for key, value in fields.items())
+def _origin(service_name: str | None, environment: str | None) -> str | None:
+    parts = [p for p in (service_name, environment) if p]
+    return " · ".join(parts) if parts else None
 
 
 def build_message(level: str, service_name: str | None, environment: str | None,
                   text: str, fields: dict) -> str:
-    """Build the HTML header part of a notification (no traceback)."""
+    """Build the HTML header part of a notification (no traceback).
+
+    Layout:
+        <emoji> <b>title</b>
+        <i>[service · env]</i>
+
+        key: <code>value</code>   (one field per line; code = tap-to-copy)
+    """
     text = text[:TEXT_BUDGET]
-    parts = [EMOJI[level], " "]
-    if service_name:
-        parts.append(f"<b>[{html.escape(service_name)}]</b>")
-    if environment:
-        parts.append(f"<b>[{html.escape(environment)}]</b>")
-    if service_name or environment:
-        parts.append(" ")
-    parts.append(html.escape(text))
+    lines = [f"{EMOJI[level]} <b>{html.escape(text)}</b>"]
+    origin = _origin(service_name, environment)
+    if origin:
+        lines.append(f"<i>[{html.escape(origin)}]</i>")
     if fields:
-        parts.append("\n<code>" + html.escape(format_fields(fields)) + "</code>")
-    return "".join(parts)
+        lines.append("")
+        for key, value in fields.items():
+            lines.append(f"{html.escape(str(key))}: <code>{html.escape(str(value))}</code>")
+    return "\n".join(lines)
 
 
 def build_plain(level: str, service_name: str | None, environment: str | None,
                 text: str, fields: dict) -> str:
     """Plain-text variant, used as a document caption or as a no-HTML fallback."""
     text = text[:TEXT_BUDGET]
-    prefix = "".join(f"[{part}]" for part in (service_name, environment) if part)
-    if prefix:
-        prefix += " "
-    message = f"{EMOJI[level]} {prefix}{text}"
+    lines = [f"{EMOJI[level]} {text}"]
+    origin = _origin(service_name, environment)
+    if origin:
+        lines.append(f"[{origin}]")
     if fields:
-        message += "\n" + format_fields(fields)
-    return message
+        lines.append("")
+        lines.extend(f"{key}: {value}" for key, value in fields.items())
+    return "\n".join(lines)
 
 
 def format_traceback(exc: BaseException, budget: int = TRACEBACK_BUDGET) -> str:
