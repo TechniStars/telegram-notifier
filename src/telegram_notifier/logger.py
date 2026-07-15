@@ -2,7 +2,6 @@
 
 import logging
 import os
-import threading
 from typing import NamedTuple
 
 from .dedup import ErrorDeduplicator, fingerprint
@@ -29,9 +28,11 @@ class _Notification(NamedTuple):
 class TelegramLogger:
     """Send service notifications to a Telegram group.
 
-    Sync methods (info/warning/error/user_action) are fire-and-forget: they
-    dispatch from a daemon thread and never raise. Async variants (ainfo/
-    awarning/aerror/auser_action) await the send but also never raise.
+    All methods (sync and async variants) are fire-and-forget and never
+    raise: notifications are queued in the sender and dispatched from a
+    background worker thread, paced to stay under Telegram's per-group
+    rate limit. blocking=True waits for the queue to drain after each
+    call — meant for short-lived scripts, not for async apps (it blocks).
 
     When bot_token or chat_id is missing (arguments and environment both),
     the logger is disabled and every call is a no-op — safe for dev/tests.
@@ -122,10 +123,9 @@ class TelegramLogger:
     def _dispatch(self, notification: _Notification | None) -> None:
         if notification is None:
             return
+        self._send_safe(notification)
         if self._blocking:
-            self._send_safe(notification)
-        else:
-            threading.Thread(target=self._send_safe, args=(notification,), daemon=True).start()
+            self._sender.flush()
 
     def _send_safe(self, notification: _Notification) -> None:
         try:
@@ -150,23 +150,5 @@ class TelegramLogger:
             )
 
     async def _asend(self, notification: _Notification | None) -> None:
-        if notification is None:
-            return
-        try:
-            n = notification
-            if len(n.html) <= TELEGRAM_MESSAGE_LIMIT:
-                await self._sender.asend_message(self._chat_id, n.html, n.thread_id)
-            elif n.traceback is not None:
-                await self._sender.asend_document(
-                    self._chat_id,
-                    "traceback.txt",
-                    n.traceback.encode(),
-                    caption=n.plain[:TELEGRAM_CAPTION_LIMIT],
-                    thread_id=n.thread_id,
-                )
-            else:
-                await self._sender.asend_message(
-                    self._chat_id, n.plain[:TELEGRAM_MESSAGE_LIMIT], n.thread_id, parse_mode=None
-                )
-        except Exception:
-            log.exception("telegram notification failed")
+        # Enqueueing never blocks, so async variants share the sync path.
+        self._dispatch(notification)

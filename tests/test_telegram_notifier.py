@@ -1,10 +1,11 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from telegram_notifier import TelegramLogger
 from telegram_notifier.dedup import ErrorDeduplicator, fingerprint
+from telegram_notifier.sender import MAX_RETRY_AFTER, TelegramSender, _retry_delay
 from telegram_notifier.formatting import (
     TELEGRAM_MESSAGE_LIMIT,
     append_traceback,
@@ -137,11 +138,58 @@ class TestLogger:
 
     def test_async_api(self):
         tg = make_logger()
-        tg._sender = MagicMock(asend_message=AsyncMock(), asend_document=AsyncMock())
 
         async def run():
             await tg.ainfo("hello", user_id=1)
             await tg.aerror("bad", exc=raise_and_catch())
 
         asyncio.run(run())
-        assert tg._sender.asend_message.await_count == 2
+        assert tg._sender.send_message.call_count == 2
+
+
+class TestSenderQueue:
+    def make_sender(self, **kwargs) -> TelegramSender:
+        sender = TelegramSender("123:abc", min_interval=0.0, **kwargs)
+        sender.posts = []
+        sender._post = lambda method, **kw: sender.posts.append((method, kw))
+        return sender
+
+    def test_worker_sends_queued_message(self):
+        sender = self.make_sender()
+        sender.send_message(-100123, "hi", thread_id=2)
+        sender.flush(timeout=5.0)
+        assert sender.posts == [
+            (
+                "/sendMessage",
+                {"json": {"chat_id": -100123, "text": "hi", "parse_mode": "HTML", "message_thread_id": 2}},
+            )
+        ]
+
+    def test_full_queue_drops_and_reports_count(self):
+        sender = self.make_sender(max_queue_size=1)
+        sender._ensure_worker = lambda: None  # keep worker off so the queue stays full
+        sender.send_message(-1, "first")
+        sender.send_message(-1, "dropped 1")
+        sender.send_message(-1, "dropped 2")
+        assert sender._queue.qsize() == 1
+        assert sender._dropped == 2
+        method, kwargs = sender._queue.get()
+        noted = sender._with_dropped_note(method, kwargs)
+        assert noted["json"]["text"] == "first\n(+2 dropped: queue full)"
+        assert sender._dropped == 0
+
+    def test_document_does_not_consume_dropped_count(self):
+        sender = self.make_sender()
+        sender._dropped = 3
+        kwargs = {"data": {"chat_id": "-1"}, "files": {"document": ("t.txt", b"x")}}
+        assert sender._with_dropped_note("/sendDocument", kwargs) is kwargs
+        assert sender._dropped == 3
+
+    def test_retry_delay_parses_telegram_hint(self):
+        response = MagicMock(status_code=429)
+        response.json.return_value = {"parameters": {"retry_after": 7}}
+        assert _retry_delay(response) == 7.0
+        response.json.return_value = {"parameters": {"retry_after": 999}}
+        assert _retry_delay(response) == MAX_RETRY_AFTER
+        assert _retry_delay(MagicMock(status_code=502)) == 1.0
+        assert _retry_delay(MagicMock(status_code=200)) is None
