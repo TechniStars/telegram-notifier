@@ -68,8 +68,8 @@ class TelegramLogger:
     def warning(self, text: str, **fields) -> None:
         self._dispatch(self._prepare("warning", text, fields))
 
-    def user_action(self, text: str, **fields) -> None:
-        self._dispatch(self._prepare("user_action", text, fields))
+    def other(self, kind: str, text: str, **fields) -> None:
+        self._dispatch(self._prepare_other(kind, text, fields))
 
     def error(self, text: str, exc: BaseException | None = None, **fields) -> None:
         self._dispatch(self._prepare_error(text, exc, fields))
@@ -82,8 +82,8 @@ class TelegramLogger:
     async def awarning(self, text: str, **fields) -> None:
         await self._asend(self._prepare("warning", text, fields))
 
-    async def auser_action(self, text: str, **fields) -> None:
-        await self._asend(self._prepare("user_action", text, fields))
+    async def aother(self, kind: str, text: str, **fields) -> None:
+        await self._asend(self._prepare_other(kind, text, fields))
 
     async def aerror(self, text: str, exc: BaseException | None = None, **fields) -> None:
         await self._asend(self._prepare_error(text, exc, fields))
@@ -97,6 +97,16 @@ class TelegramLogger:
             html=build_message(level, self._service_name, self._environment, text, fields),
             plain=build_plain(level, self._service_name, self._environment, text, fields),
             thread_id=self._topics.get(level),
+            traceback=None,
+        )
+
+    def _prepare_other(self, kind: str, text: str, fields: dict) -> _Notification | None:
+        if not self.enabled:
+            return None
+        return _Notification(
+            html=build_message("info", self._service_name, self._environment, text, fields),
+            plain=build_plain("info", self._service_name, self._environment, text, fields),
+            thread_id=self._topics.get(kind),
             traceback=None,
         )
 

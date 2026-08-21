@@ -18,14 +18,15 @@ routed to topics by level.
 Telegram topic **names are irrelevant** to this package. Routing is explicit:
 
 1. The caller picks the level by picking the method: `tg.info(...)` routes to
-   the `"info"` topic, `tg.error(...)` to `"error"`, etc. There is no per-call
-   topic argument.
+   the `"info"` topic, `tg.error(...)` to `"error"`, etc. For domain-specific
+   topics use `tg.other(kind="reports", ...)`; it routes through
+   `topics["reports"]` while retaining the standard info formatting.
 2. The `topics` dict passed to the constructor translates level →
    `message_thread_id`. That id is a plain int: Telegram assigns it when a
    topic is created (it is the `message_id` of the "topic created" service
    message), and every message posted in that topic carries it. Ids are
    per-group — a new group means new ids.
-3. A level missing from the dict posts to the group's General topic.
+3. A level or custom kind missing from the dict posts to the group's General topic.
 
 Tracebacks: only `error()` handles them — pass the exception as `exc=`:
 `tg.error("summary", exc=e)`. Without `exc` it's just a text message. Every
@@ -127,7 +128,8 @@ from app.notify import tg
 
 tg.info("worker started", queue="agentic")
 tg.warning("retry 3/5", job_id="xyz")
-tg.user_action("user_registered", user_id=123)
+tg.other("user_action", "user_registered", user_id=123)
+tg.other("reports", "content_report", object_id="recipe-1", user_report="wrong photo")
 
 try:
     ...
@@ -136,7 +138,7 @@ except Exception as e:
     raise
 ```
 
-Async variants: `await tg.ainfo(...)`, `awarning`, `aerror`, `auser_action`.
+Async variants: `await tg.ainfo(...)`, `awarning`, `aerror`, `aother`.
 
 ### 7. Keep the group useful
 
