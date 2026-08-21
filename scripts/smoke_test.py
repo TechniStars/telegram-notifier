@@ -17,7 +17,7 @@ if not tg.enabled:
 
 tg.info("worker started", queue="agentic", replicas=2)
 tg.warning("retry 3/5", job_id="abc-123")
-tg.user_action("user_registered", user_id=42, email="test@example.com")
+tg.other("user_action", "user_registered", user_id=42, email="test@example.com")
 
 
 def inner():
@@ -39,4 +39,4 @@ try:
 except ValueError as e:
     tg.error("pipeline failed", exc=e, user_id=42, pipeline="dietary")
 
-print("sent: info, warning, user_action, error (+1 duplicate suppressed)")
+print("sent: info, other(user_action), error (+1 duplicate suppressed)")

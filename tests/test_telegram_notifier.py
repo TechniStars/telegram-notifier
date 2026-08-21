@@ -15,10 +15,11 @@ from telegram_notifier.formatting import (
 
 
 def make_logger(**kwargs) -> TelegramLogger:
+    topics = kwargs.pop("topics", {"info": 2, "error": 7, "user_action": 10})
     tg = TelegramLogger(
         bot_token="123:abc",
         chat_id=-100123,
-        topics={"info": 2, "error": 7},
+        topics=topics,
         service_name="test-svc",
         environment="test-env",
         blocking=True,
@@ -107,6 +108,21 @@ class TestLogger:
         assert "[test-svc · test-env]" in text
         assert "queue: <code>agentic</code>" in text
 
+    def test_other_routes_by_kind(self):
+        tg = make_logger(topics={"info": 2, "error": 7, "reports": 9})
+        tg.other("reports", "content report", object_id="recipe-1")
+        (chat_id, text, thread_id), _ = tg._sender.send_message.call_args
+        assert chat_id == -100123
+        assert thread_id == 9
+        assert "<b>content report</b>" in text
+        assert "object_id: <code>recipe-1</code>" in text
+
+    def test_other_routes_user_action_kind(self):
+        tg = make_logger()
+        tg.other("user_action", "user_registered", user_id=1)
+        (_, _, thread_id), _ = tg._sender.send_message.call_args
+        assert thread_id == 10
+
     def test_error_with_traceback(self):
         tg = make_logger()
         tg.error("failed", exc=raise_and_catch(), user_id=5)
@@ -141,10 +157,11 @@ class TestLogger:
 
         async def run():
             await tg.ainfo("hello", user_id=1)
+            await tg.aother("reports", "report", object_id=2)
             await tg.aerror("bad", exc=raise_and_catch())
 
         asyncio.run(run())
-        assert tg._sender.send_message.call_count == 2
+        assert tg._sender.send_message.call_count == 3
 
 
 class TestSenderQueue:
