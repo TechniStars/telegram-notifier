@@ -117,6 +117,35 @@ class TestLogger:
         assert "<b>content report</b>" in text
         assert "object_id: <code>recipe-1</code>" in text
 
+    def test_html_message_routes_custom_markup(self):
+        tg = make_logger(topics={"info": 2, "user_feedbacks": 1806})
+        tg.html_message(
+            "user_feedbacks",
+            "daily_feedback_submission",
+            "user_id: 123\n1. <b>Question</b>\n<i>Answer</i>",
+            "user_id: 123\n1. Question\nAnswer",
+        )
+        (chat_id, text, thread_id), _ = tg._sender.send_message.call_args
+        assert chat_id == -100123
+        assert thread_id == 1806
+        assert "user_id: 123" in text
+        assert "1. <b>Question</b>" in text
+        assert "<i>Answer</i>" in text
+
+    def test_oversized_html_message_uses_plain_fallback(self):
+        tg = make_logger()
+        tg.html_message(
+            "info",
+            "custom",
+            "x" * (TELEGRAM_MESSAGE_LIMIT + 1),
+            "plain fallback",
+        )
+        (chat_id, text, thread_id), kwargs = tg._sender.send_message.call_args
+        assert chat_id == -100123
+        assert thread_id == 2
+        assert text.endswith("plain fallback")
+        assert kwargs["parse_mode"] is None
+
     def test_other_routes_user_action_kind(self):
         tg = make_logger()
         tg.other("user_action", "user_registered", user_id=1)
@@ -158,10 +187,11 @@ class TestLogger:
         async def run():
             await tg.ainfo("hello", user_id=1)
             await tg.aother("reports", "report", object_id=2)
+            await tg.ahtml_message("reports", "custom", "<b>custom</b>", "custom")
             await tg.aerror("bad", exc=raise_and_catch())
 
         asyncio.run(run())
-        assert tg._sender.send_message.call_count == 3
+        assert tg._sender.send_message.call_count == 4
 
 
 class TestSenderQueue:

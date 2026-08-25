@@ -71,6 +71,22 @@ class TelegramLogger:
     def other(self, kind: str, text: str, **fields) -> None:
         self._dispatch(self._prepare_other(kind, text, fields))
 
+    def html_message(
+        self,
+        kind: str,
+        text: str,
+        html_body: str,
+        plain_body: str | None = None,
+    ) -> None:
+        """Send a custom HTML message to a topic.
+
+        ``html_body`` must use Telegram's HTML subset and must escape any
+        user-supplied values before adding markup. ``plain_body`` is used if
+        the HTML message is too large for Telegram and the logger falls back
+        to a plain-text send.
+        """
+        self._dispatch(self._prepare_html_message(kind, text, html_body, plain_body))
+
     def error(self, text: str, exc: BaseException | None = None, **fields) -> None:
         self._dispatch(self._prepare_error(text, exc, fields))
 
@@ -84,6 +100,15 @@ class TelegramLogger:
 
     async def aother(self, kind: str, text: str, **fields) -> None:
         await self._asend(self._prepare_other(kind, text, fields))
+
+    async def ahtml_message(
+        self,
+        kind: str,
+        text: str,
+        html_body: str,
+        plain_body: str | None = None,
+    ) -> None:
+        await self._asend(self._prepare_html_message(kind, text, html_body, plain_body))
 
     async def aerror(self, text: str, exc: BaseException | None = None, **fields) -> None:
         await self._asend(self._prepare_error(text, exc, fields))
@@ -106,6 +131,29 @@ class TelegramLogger:
         return _Notification(
             html=build_message("info", self._service_name, self._environment, text, fields),
             plain=build_plain("info", self._service_name, self._environment, text, fields),
+            thread_id=self._topics.get(kind),
+            traceback=None,
+        )
+
+    def _prepare_html_message(
+        self,
+        kind: str,
+        text: str,
+        html_body: str,
+        plain_body: str | None,
+    ) -> _Notification | None:
+        if not self.enabled:
+            return None
+
+        html_header = build_message("info", self._service_name, self._environment, text, {})
+        plain_header = build_plain("info", self._service_name, self._environment, text, {})
+        return _Notification(
+            html=f"{html_header}\n\n{html_body}" if html_body else html_header,
+            plain=(
+                f"{plain_header}\n\n{plain_body}"
+                if plain_body
+                else plain_header
+            ),
             thread_id=self._topics.get(kind),
             traceback=None,
         )
