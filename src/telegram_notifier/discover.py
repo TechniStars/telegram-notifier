@@ -13,14 +13,19 @@ import sys
 
 import httpx
 
+from .sender import API_BASE, install_httpx_log_redaction
+
 
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         sys.exit("Set TELEGRAM_BOT_TOKEN")
 
-    resp = httpx.get(f"https://api.telegram.org/bot{token}/getUpdates", timeout=30)
-    resp.raise_for_status()
+    install_httpx_log_redaction()
+    resp = httpx.get(f"{API_BASE}/bot{token}/getUpdates", timeout=30)
+    # Not raise_for_status(): its message would print the token URL.
+    if resp.is_error:
+        sys.exit(f"getUpdates returned {resp.status_code}: {resp.text[:300]}")
     updates = resp.json()["result"]
 
     if not updates:

@@ -172,6 +172,21 @@ as a handler for your entire `logging` output, or the group turns into noise.
 | `blocking` | `False` | sync methods send inline instead of daemon thread |
 | `timeout` | `10` | HTTP timeout seconds |
 
+## Bot token in logs
+
+The Bot API takes the token only in the URL path (`/bot<token>/sendMessage`),
+so every request URL is a secret. The library keeps it out of logs:
+
+- a filter on the `httpx` logger rewrites it to `/bot***` in request logs
+  (installed once when a sender is created; your log levels and handlers stay
+  as they are),
+- failed sends raise `TelegramSendError` with a redacted message and no chained
+  httpx exception, so `telegram send failed` tracebacks (stdout, Sentry) carry
+  no token.
+
+Other tools that log full outgoing URLs (e.g. HTTP breadcrumbs of an error
+tracker) are outside this library's reach.
+
 ## Tests
 
 ```

@@ -3,6 +3,7 @@
 import atexit
 import logging
 import queue
+import re
 import threading
 import time
 
@@ -13,6 +14,70 @@ from .formatting import TELEGRAM_MESSAGE_LIMIT
 log = logging.getLogger("telegram_notifier")
 
 API_BASE = "https://api.telegram.org"
+
+# The Bot API only accepts the token in the URL path (/bot<token>/method), so
+# every URL we build is a secret. Two places would otherwise print it: httpx
+# logs each request URL at INFO, and httpx.HTTPStatusError puts the URL in its
+# message (-> log.exception -> stdout/Sentry). Token format: "<bot id>:<secret>".
+_BOT_TOKEN_IN_URL = re.compile(r"/bot\d+:[A-Za-z0-9_-]+")
+
+
+def redact_token(text: str) -> str:
+    return _BOT_TOKEN_IN_URL.sub("/bot***", text)
+
+
+class TelegramSendError(Exception):
+    """Send failed. The message never contains the bot token."""
+
+
+class _RedactBotTokenFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = redact_token(message)
+        if redacted != message:
+            record.msg, record.args = redacted, ()
+        return True
+
+
+def install_httpx_log_redaction() -> None:
+    """Mask bot tokens in httpx request logs. Idempotent; leaves the consumer's
+    logging config (levels, handlers) untouched."""
+    httpx_log = logging.getLogger("httpx")
+    if not any(isinstance(f, _RedactBotTokenFilter) for f in httpx_log.filters):
+        httpx_log.addFilter(_RedactBotTokenFilter())
+
+
+# Last line of defence for everything we post: alerts carry exception messages
+# and tracebacks, and providers echo key fragments in them (OpenAI's 401 shows
+# "sk-abc*****wxyz"). Matched by the SHAPE of the value, not by field names, so
+# it also covers free text. Patterns are prefix-anchored with bounded classes
+# (no nested quantifiers) to stay ReDoS-safe.
+_SECRET_MASK = "[secret]"
+_SECRET_PATTERNS = [
+    # OpenAI/Anthropic-style keys, including provider-masked fragments (*)
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_*-]{8,}"),
+    # Google API keys: classic and the newer "AQ." format
+    re.compile(r"AIza[0-9A-Za-z_-]{30,}"),
+    re.compile(r"(?<![A-Za-z0-9])AQ\.[A-Za-z0-9_-]{30,}"),
+    # Telegram bot token
+    re.compile(r"\d{5,16}:[A-Za-z0-9_-]{34,}"),
+    # JWT
+    re.compile(r"ey[A-Za-z0-9_-]{10,}\.ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    # Bearer tokens in free text
+    re.compile(r"[Bb]earer\s+[A-Za-z0-9._~+/=-]{10,}"),
+    # NeededApp internal keys (ndd_ prefix)
+    re.compile(r"ndd_[A-Za-z0-9]{20,}"),
+]
+# key=... in URLs/query strings keeps the parameter name, masks the value
+_SECRET_QUERY_PARAM = re.compile(r"(?i)([?&](?:key|api_key|apikey|token|access_token)=)[^&\s\"'<>]+")
+
+
+def scrub_secrets(text: str) -> str:
+    """Replace anything shaped like an API key or token with a mask."""
+    text = _BOT_TOKEN_IN_URL.sub("/bot***", text)
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub(_SECRET_MASK, text)
+    return _SECRET_QUERY_PARAM.sub(rf"\1{_SECRET_MASK}", text)
 
 # Cap on how long we honor Telegram's retry_after hint; anything longer
 # means the group is flooded and dropping the message is the right call.
@@ -37,7 +102,7 @@ def _message_payload(
     thread_id: int | None,
     parse_mode: str | None,
 ) -> dict:
-    payload: dict = {"chat_id": chat_id, "text": text}
+    payload: dict = {"chat_id": chat_id, "text": scrub_secrets(text)}
     if parse_mode:
         payload["parse_mode"] = parse_mode
     if thread_id is not None:
@@ -54,9 +119,15 @@ def _document_parts(
 ) -> tuple[dict, dict]:
     data: dict = {"chat_id": str(chat_id)}
     if caption:
-        data["caption"] = caption
+        data["caption"] = scrub_secrets(caption)
     if thread_id is not None:
         data["message_thread_id"] = str(thread_id)
+    # Long tracebacks go out as text documents — scrub them like messages.
+    # Non-UTF-8 content is binary we did not generate; it is sent as is.
+    try:
+        content = scrub_secrets(content.decode("utf-8")).encode("utf-8")
+    except UnicodeDecodeError:
+        pass
     files = {"document": (filename, content)}
     return data, files
 
@@ -90,6 +161,7 @@ class TelegramSender:
         min_interval: float = DEFAULT_MIN_INTERVAL,
         max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
     ):
+        install_httpx_log_redaction()
         self._base = f"{API_BASE}/bot{bot_token}"
         self._timeout = timeout
         self._min_interval = min_interval
@@ -206,12 +278,22 @@ class TelegramSender:
         return {**kwargs, "json": payload}
 
     def _post(self, method: str, **kwargs) -> None:
+        # Errors are re-raised as TelegramSendError without chaining: the httpx
+        # exceptions carry the token URL and log.exception would print the chain.
         with httpx.Client(timeout=self._timeout) as client:
             for attempt in range(MAX_ATTEMPTS):
-                response = client.post(self._base + method, **kwargs)
+                try:
+                    response = client.post(self._base + method, **kwargs)
+                except httpx.HTTPError as exc:
+                    raise TelegramSendError(
+                        f"telegram {method}: {type(exc).__name__}: {redact_token(str(exc))}"
+                    ) from None
                 delay = _retry_delay(response)
                 if delay is None:
                     break
                 if attempt < MAX_ATTEMPTS - 1:
                     time.sleep(delay)
-            response.raise_for_status()
+            if response.is_error:
+                raise TelegramSendError(
+                    f"telegram {method} returned {response.status_code}: {redact_token(response.text[:300])}"
+                )
