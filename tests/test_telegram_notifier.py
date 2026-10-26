@@ -1,11 +1,14 @@
 import asyncio
+import logging
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from telegram_notifier import TelegramLogger
 from telegram_notifier.dedup import ErrorDeduplicator, fingerprint
-from telegram_notifier.sender import MAX_RETRY_AFTER, TelegramSender, _retry_delay
+from telegram_notifier import sender as sender_module
+from telegram_notifier.sender import MAX_RETRY_AFTER, TelegramSender, TelegramSendError, _retry_delay, redact_token, scrub_secrets
 from telegram_notifier.formatting import (
     TELEGRAM_MESSAGE_LIMIT,
     append_traceback,
@@ -117,6 +120,35 @@ class TestLogger:
         assert "<b>content report</b>" in text
         assert "object_id: <code>recipe-1</code>" in text
 
+    def test_html_message_routes_custom_markup(self):
+        tg = make_logger(topics={"info": 2, "user_feedbacks": 1806})
+        tg.html_message(
+            "user_feedbacks",
+            "daily_feedback_submission",
+            "user_id: 123\n1. <b>Question</b>\n<i>Answer</i>",
+            "user_id: 123\n1. Question\nAnswer",
+        )
+        (chat_id, text, thread_id), _ = tg._sender.send_message.call_args
+        assert chat_id == -100123
+        assert thread_id == 1806
+        assert "user_id: 123" in text
+        assert "1. <b>Question</b>" in text
+        assert "<i>Answer</i>" in text
+
+    def test_oversized_html_message_uses_plain_fallback(self):
+        tg = make_logger()
+        tg.html_message(
+            "info",
+            "custom",
+            "x" * (TELEGRAM_MESSAGE_LIMIT + 1),
+            "plain fallback",
+        )
+        (chat_id, text, thread_id), kwargs = tg._sender.send_message.call_args
+        assert chat_id == -100123
+        assert thread_id == 2
+        assert text.endswith("plain fallback")
+        assert kwargs["parse_mode"] is None
+
     def test_other_routes_user_action_kind(self):
         tg = make_logger()
         tg.other("user_action", "user_registered", user_id=1)
@@ -158,10 +190,11 @@ class TestLogger:
         async def run():
             await tg.ainfo("hello", user_id=1)
             await tg.aother("reports", "report", object_id=2)
+            await tg.ahtml_message("reports", "custom", "<b>custom</b>", "custom")
             await tg.aerror("bad", exc=raise_and_catch())
 
         asyncio.run(run())
-        assert tg._sender.send_message.call_count == 3
+        assert tg._sender.send_message.call_count == 4
 
 
 class TestSenderQueue:
@@ -210,3 +243,128 @@ class TestSenderQueue:
         assert _retry_delay(response) == MAX_RETRY_AFTER
         assert _retry_delay(MagicMock(status_code=502)) == 1.0
         assert _retry_delay(MagicMock(status_code=200)) is None
+
+
+class TestBotTokenRedaction:
+    TOKEN = "123456789:AAH-secret_Token-value"
+
+    def _sender_with_transport(self, monkeypatch, handler):
+        real_client = httpx.Client
+        monkeypatch.setattr(
+            sender_module.httpx,
+            "Client",
+            lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+        )
+        monkeypatch.setattr(sender_module.time, "sleep", lambda s: None)
+        return TelegramSender(self.TOKEN)
+
+    def test_redact_token_masks_only_the_token(self):
+        url = f"https://api.telegram.org/bot{self.TOKEN}/sendMessage"
+        assert redact_token(url) == "https://api.telegram.org/bot***/sendMessage"
+        assert redact_token("/bots/list and /bothering") == "/bots/list and /bothering"
+
+    def test_httpx_request_log_does_not_contain_token(self, monkeypatch, caplog):
+        sender = self._sender_with_transport(monkeypatch, lambda req: httpx.Response(200, json={"ok": True}))
+        with caplog.at_level(logging.INFO, logger="httpx"):
+            sender._post("/sendMessage", json={"chat_id": 1, "text": "hi"})
+        messages = [r.getMessage() for r in caplog.records if r.name == "httpx"]
+        assert messages, "httpx should still log the request"
+        assert all(self.TOKEN not in m for m in messages)
+        assert any("/bot***/sendMessage" in m for m in messages)
+
+    def test_http_error_does_not_leak_token(self, monkeypatch):
+        sender = self._sender_with_transport(
+            monkeypatch, lambda req: httpx.Response(400, json={"ok": False, "description": "Bad Request: chat not found"})
+        )
+        with pytest.raises(TelegramSendError) as exc_info:
+            sender._post("/sendMessage", json={"chat_id": 1, "text": "hi"})
+        assert self.TOKEN not in str(exc_info.value)
+        assert "400" in str(exc_info.value)
+        assert exc_info.value.__cause__ is None and exc_info.value.__context__ is None
+
+    def test_transport_error_does_not_leak_token(self, monkeypatch):
+        def boom(req):
+            raise httpx.ConnectError(f"cannot reach {req.url}", request=req)
+
+        sender = self._sender_with_transport(monkeypatch, boom)
+        with pytest.raises(TelegramSendError) as exc_info:
+            sender._post("/sendMessage", json={"chat_id": 1, "text": "hi"})
+        assert self.TOKEN not in str(exc_info.value)
+        assert "ConnectError" in str(exc_info.value)
+        # chain suppressed: the original httpx error (with the URL) is not printed
+        assert exc_info.value.__suppress_context__
+
+    def test_worker_failure_log_does_not_contain_token(self, monkeypatch, caplog):
+        sender = self._sender_with_transport(monkeypatch, lambda req: httpx.Response(401, json={"ok": False}))
+        with caplog.at_level(logging.ERROR, logger="telegram_notifier"):
+            sender.send_message(-1, "hi")
+            sender.flush(timeout=5.0)
+        logged = "\n".join(caplog.text.splitlines())
+        assert "telegram send failed" in logged
+        assert self.TOKEN not in logged
+
+    def test_filter_is_installed_once(self):
+        TelegramSender(self.TOKEN)
+        TelegramSender(self.TOKEN)
+        filters = [f for f in logging.getLogger("httpx").filters if type(f).__name__ == "_RedactBotTokenFilter"]
+        assert len(filters) == 1
+
+
+class TestSecretScrubbing:
+    SECRETS = [
+        "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+        "sk-bogus***********test",  # OpenAI echoes masked fragments like this
+        "AIzaSyA1234567890abcdefghijklmnopqrstuv",
+        "AQ.Ab8RN6J6CQY4t99s42Y2J6sElUCunconFyfsXW4vIys",
+        "123456789:AAHsecretsecretsecretsecretsecretsec",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+        "ndd_abcdefghijklmnopqrstuvwxyz",
+    ]
+
+    @pytest.mark.parametrize("secret", SECRETS)
+    def test_secret_shapes_are_masked(self, secret):
+        out = scrub_secrets(f"Incorrect API key provided: {secret}. See docs")
+        assert secret not in out
+        assert "[secret]" in out
+
+    def test_bearer_and_query_params_are_masked(self):
+        out = scrub_secrets("Authorization: Bearer abcdefghijklmnop https://x.io/v1?key=SECRETVALUE123&alt=json")
+        assert "abcdefghijklmnop" not in out and "SECRETVALUE123" not in out
+        assert "?key=[secret]&alt=json" in out
+
+    def test_ordinary_text_is_untouched(self):
+        text = "menu generation failed user_id=e25d9aa5-a0c5-4c3a-9105-0102701a0615 task-1234 status 402"
+        assert scrub_secrets(text) == text
+
+    def test_message_payload_is_scrubbed(self):
+        payload = sender_module._message_payload(-1, "key sk-proj-AbCdEfGhIjKlMnOpQrStUv", None, "HTML")
+        assert "sk-proj" not in payload["text"]
+
+    def test_document_caption_and_content_are_scrubbed(self):
+        data, files = sender_module._document_parts(
+            -1, "tb.txt", b"Traceback: AIzaSyA1234567890abcdefghijklmnopqrstuv", "sk-proj-AbCdEfGhIjKlMnOpQrStUv", None
+        )
+        assert "sk-proj" not in data["caption"]
+        assert b"AIza" not in files["document"][1]
+
+    def test_binary_document_is_sent_as_is(self):
+        blob = b"\xff\xfe\x00binary"
+        _, files = sender_module._document_parts(-1, "x.bin", blob, None, None)
+        assert files["document"][1] == blob
+
+    def test_logger_error_with_key_in_exception_never_reaches_telegram(self):
+        """End to end through TelegramLogger -> real sender -> captured POST body."""
+        tg = make_logger()
+        sender = TelegramSender("123:abc", min_interval=0)
+        posted = []
+        sender._post = lambda method, **kw: posted.append(kw)
+        tg._sender = sender
+        try:
+            raise RuntimeError("Error code: 401 - Incorrect API key provided: sk-proj-AbCdEfGhIjKlMnOpQrStUvWx")
+        except RuntimeError as exc:
+            tg.error("generation failed", exc=exc, provider_error="key sk-bogus*****test")
+        sender.flush(timeout=5.0)
+        body = repr(posted)
+        assert posted
+        assert "sk-proj-AbCd" not in body and "sk-bogus" not in body
+        assert "[secret]" in body

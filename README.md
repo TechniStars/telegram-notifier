@@ -29,9 +29,10 @@ Telegram topic **names are irrelevant** to this package. Routing is explicit:
 3. A level or custom kind missing from the dict posts to the group's General topic.
 
 Tracebacks: only `error()` handles them — pass the exception as `exc=`:
-`tg.error("summary", exc=e)`. Without `exc` it's just a text message. Every
-method accepts extra `**fields` kwargs, appended as a `key=value | key=value`
-context line.
+`tg.error("summary", exc=e)`. Without `exc` it's just a text message. The
+standard methods accept extra `**fields` kwargs, rendered as escaped `<code>`
+values. For a domain-specific layout, `html_message()` sends a caller-built
+Telegram HTML body while retaining the same topic routing and delivery queue.
 
 ## End-to-end setup
 
@@ -131,6 +132,13 @@ tg.warning("retry 3/5", job_id="xyz")
 tg.other("user_action", "user_registered", user_id=123)
 tg.other("reports", "content_report", object_id="recipe-1", user_report="wrong photo")
 
+tg.html_message(
+    "user_feedbacks",
+    "daily_feedback_submission",
+    html_body="user_id: 123\n1. <b>Question</b>\n  <i>Answer</i>",
+    plain_body="user_id: 123\n1. Question\n  Answer",
+)
+
 try:
     ...
 except Exception as e:
@@ -138,7 +146,13 @@ except Exception as e:
     raise
 ```
 
-Async variants: `await tg.ainfo(...)`, `awarning`, `aerror`, `aother`.
+Async variants: `await tg.ainfo(...)`, `awarning`, `aerror`, `aother`,
+`ahtml_message`.
+
+`html_message()` expects Telegram-compatible HTML. Escape all user-supplied
+values before adding tags (for example with Python's `html.escape`). Pass a
+`plain_body` when the custom message may exceed Telegram's 4096-character
+limit, because oversized messages use the plain-text fallback.
 
 ### 7. Keep the group useful
 
@@ -157,6 +171,21 @@ as a handler for your entire `logging` output, or the group turns into noise.
 | `dedup_window_seconds` | `300` | error suppression window |
 | `blocking` | `False` | sync methods send inline instead of daemon thread |
 | `timeout` | `10` | HTTP timeout seconds |
+
+## Bot token in logs
+
+The Bot API takes the token only in the URL path (`/bot<token>/sendMessage`),
+so every request URL is a secret. The library keeps it out of logs:
+
+- a filter on the `httpx` logger rewrites it to `/bot***` in request logs
+  (installed once when a sender is created; your log levels and handlers stay
+  as they are),
+- failed sends raise `TelegramSendError` with a redacted message and no chained
+  httpx exception, so `telegram send failed` tracebacks (stdout, Sentry) carry
+  no token.
+
+Other tools that log full outgoing URLs (e.g. HTTP breadcrumbs of an error
+tracker) are outside this library's reach.
 
 ## Tests
 
